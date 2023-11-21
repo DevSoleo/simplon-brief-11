@@ -1,0 +1,169 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: az-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-azure
+  template:
+    metadata:
+      labels:
+        app: redis-azure
+    spec:
+      volumes:
+        - name: redis-vol
+          persistentVolumeClaim:
+            claimName: redis-pvc
+      containers:
+      - name: redis
+        image: redis:latest
+        args: ["--requirepass", "$(REDIS_PWD)"]
+        volumeMounts:
+        - name: redis-vol
+          mountPath: /data
+        env:
+        - name: ALLOW_EMPTY_PASSWORD
+          value: "no"
+        - name: REDIS_PWD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        ports:
+        - containerPort: 6379
+          name: redis
+
+---
+# Service for Redis (Cluster IP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+spec:
+  ports:
+  - port: 6379
+  selector:
+    app: redis-azure
+
+---
+# Deployment of Voting App
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: votingapp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: az-votingapp
+  template:
+    metadata:
+      labels:
+        app: az-votingapp
+    spec:
+      nodeSelector:
+        "kubernetes.io/os": linux
+      containers:
+      - name: alfred-voting
+        image: whujin11e/public:azure_voting_app:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        ports:
+        - containerPort: 80
+        env:
+        - name: REDIS
+          value: "redis-service"
+        - name: REDIS_PWD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+---
+# App Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: vote-service
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web, websecure
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: 80
+  selector:
+    app: az-votingapp
+
+
+---
+# PV Claim creation
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+spec:
+  storageClassName: azurefile-csi
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 3Gi
+      
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: devsoleo.fr
+spec:
+  dnsNames:
+  - devsoleo.fr
+  issuerRef:
+    name: letsencrypt
+    kind: Issuer
+  secretName: secret-tls
+
+---
+# Issuer
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    # The ACME server URL
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: mail@mail.mail
+    privateKeySecretRef:
+      name: letsencrypt
+
+---
+# Traefik IP Whitelisting
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: whitelist
+spec:
+  ipWhiteList:
+    sourceRange:
+      - $publicip
+      - $privateip
